@@ -1,21 +1,28 @@
-"""Core RAG pipeline: PDF -> chunks -> OpenAI embeddings -> Chroma -> grounded answer."""
+"""Core RAG pipeline: PDF -> chunks -> local embeddings -> Chroma -> OpenAI grounded answer."""
 import hashlib
 import os
 
 import chromadb
+import torch
 from dotenv import load_dotenv
 from openai import OpenAI
 from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
-EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-large-en-v1.5")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 DB_DIR = os.getenv("CHROMA_DIR", "chroma_db")
 
-client = OpenAI()  # reads OPENAI_API_KEY from env / .env
+# bge models work best when queries (not passages) get this instruction prefix
+QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+client = OpenAI()  # reads OPENAI_API_KEY from env / .env; used only for answers
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+embedder = SentenceTransformer(EMBED_MODEL, device=DEVICE)  # free, runs locally (downloads once)
 collection = chromadb.PersistentClient(path=DB_DIR).get_or_create_collection(
-    "docs", metadata={"hnsw:space": "cosine"}
+    "docs_local", metadata={"hnsw:space": "cosine"}
 )
 
 
@@ -28,9 +35,10 @@ def chunk_text(text, size=1000, overlap=200):
     return [c for c in chunks if c.strip()]
 
 
-def embed(texts):
-    resp = client.embeddings.create(model=EMBED_MODEL, input=texts)
-    return [d.embedding for d in resp.data]
+def embed(texts, is_query=False):
+    if is_query and "bge" in EMBED_MODEL:
+        texts = [QUERY_PREFIX + t for t in texts]
+    return embedder.encode(texts, normalize_embeddings=True, batch_size=32).tolist()
 
 
 def ingest_pdf(file, filename):
@@ -52,7 +60,7 @@ def ingest_pdf(file, filename):
 
 
 def retrieve(question, k=5):
-    res = collection.query(query_embeddings=embed([question]), n_results=k)
+    res = collection.query(query_embeddings=embed([question], is_query=True), n_results=k)
     return [
         {"text": d, **m, "score": 1 - dist}
         for d, m, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0])

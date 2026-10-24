@@ -3,3 +3,4 @@ chromadb>=0.5
 pypdf>=4.0
 streamlit>=1.36
 python-dotenv>=1.0
+sentence-transformers>=3.0
